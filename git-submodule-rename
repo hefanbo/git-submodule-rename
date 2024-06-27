@@ -1,0 +1,137 @@
+#!/bin/bash
+# Rename a submodule
+#
+# To move a submodule to another path, `git mv` can be used. But after that, the
+# name (old path) and the storage location of the submodule stays untouched,
+# leaving a inconsistency between the submodule name and path.
+#
+# This script modifies the following items to rename a submodule
+# - .git/modules/<old_path> -> .git/modules/<submodule_path>
+# - <submodule_path>/.git
+# - .gitmodules
+# - .git/config
+# - .git/modules/<submodule_path>/config
+
+ERR_NONE=0
+ERR_ABORT=1
+ERR_ARGS=2
+ERR_GIT=3
+
+# Print usage message
+function Usage {
+  echo "Usage: $0 [-h] [-f] <old_name> <new_name>"
+  echo "  -h  Print help info"
+  echo "  -f  Proceed without asking for user confirmation"
+  if [ -n "$1" ]; then exit $1; fi
+}
+
+# Read user input
+function Read {
+  PROMPT_TXT=$1
+  DEFAULT_VALUE=$2
+  if [ -n "${DEFAULT_VALUE}" ]; then
+    PROMPT="${PROMPT_TXT} [${DEFAULT_VALUE}]: "
+  else
+    PROMPT="${PROMPT_TXT}: "
+  fi
+  read -p "${PROMPT}" USER_INPUT
+  echo ${USER_INPUT:-${DEFAULT_VALUE}}
+}
+
+# Check if the name is valid
+function CheckName {
+  if [ -z "$1" ]; then
+    echo "No enough arguments"
+    Usage $ERR_ARGS
+  fi
+  if [[ "$1" == *#* ]]; then
+    echo "Wrong name (# is already used as regex delimiter): $1"
+    exit $ERR_ARGS
+  fi
+  if [[ "$1" == /* ]] || [[ "$1" == */ ]]; then
+    echo "Wrong name (leading/trailing slash): $1"
+    exit $ERR_ARGS
+  fi
+}
+
+# Parse aguments
+while [ $# -gt 0 ]; do
+  case $1 in
+  "-h")
+    Usage 0
+  ;;
+  "-f")
+    NO_CONFIRM=1
+  ;;
+  *)
+    if [ -z "$OLD_NAME" ]; then
+      OLD_NAME=$1
+    elif [ -z "$NEW_NAME" ]; then
+      NEW_NAME=$1
+    else
+      echo "Wrong arguments"
+      Usage $ERR_ARGS
+    fi
+  ;;
+  esac
+  shift
+done
+
+# Check git repo
+if [ ! -d .git ]; then
+  echo "Not a git repo: .git directory is not found"
+  exit $ERR_GIT
+fi
+if [ ! -f .gitmodules ]; then
+  echo "No submodules: .gitmodules file not found"
+  exit $ERR_GIT
+fi
+
+# Check names
+CheckName $OLD_NAME
+CheckName $NEW_NAME
+if [ "$OLD_NAME" = "$NEW_NAME" ]; then
+  echo "Error: old_name and new_name must be different"
+  exit $ERR_ARGS
+fi
+
+# Check existance of the old and new paths
+if [ ! -d ".git/modules/$OLD_NAME" ]; then
+  echo "Wrong old name (storage not found): $OLD_NAME"
+  exit $ERR_ARGS
+fi
+if [ -d ".git/modules/$NEW_NAME" ]; then
+  echo "Wrong new name (storage already exists): $NEW_NAME"
+  exit $ERR_ARGS
+fi
+if [ ! -d "$NEW_NAME" ]; then
+  echo "Wrong new name (submodule not found): $NEW_NAME"
+  exit $ERR_ARGS
+fi
+
+# Danger confirm
+if [ -z "$NO_CONFIRM" ]; then
+  CONFIRM=$(Read "DANGER: if something goes wrong, the git repo may break, continue? (y/n)" "n")
+  if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ]; then
+    echo "Abort"
+    exit $ERR_ABORT
+  fi
+fi
+
+echo "Patch .gitmodules"
+sed -i 's#\(\[submodule "\)'"$OLD_NAME"'"\]#\1'"$NEW_NAME"'"\]#g' .gitmodules
+
+echo "Patch .git/config"
+sed -i 's#\(\[submodule "\)'"$OLD_NAME"'"\]#\1'"$NEW_NAME"'"\]#g' .git/config
+
+echo "Patch $NEW_NAME/.git"
+sed -i 's#\(gitdir: [./]*\.git/modules/\).*#\1'"$NEW_NAME"'#g' "$NEW_NAME/.git"
+
+echo "Move submodule storage"
+NEW_DIR=$(dirname "$NEW_NAME")
+mkdir -p ".git/modules/$NEW_DIR"
+mv ".git/modules/$OLD_NAME" ".git/modules/$NEW_NAME"
+
+echo "Patch .git/modules/$NEW_NAME/config"
+REL_PATH=$(echo ".git/modules/$NEW_NAME" | sed -e 's#[^/]*#..#g')
+sed -i 's#\(worktree = \)[./]*#\1'"$REL_PATH"'/#g' ".git/modules/$NEW_NAME/config"
